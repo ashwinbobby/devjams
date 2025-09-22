@@ -44,6 +44,7 @@ dependencies:
   file_picker: ^10.3.3
   flutter_p2p_connection: ^3.0.3
   nearby_connections: ^4.3.0
+  intl: ^0.20.2
 
 dev_dependencies:
   flutter_test:

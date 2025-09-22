@@ -11,6 +11,8 @@ class MessageManager {
       'senderName': message.senderName,
       'senderId': message.senderId,
       'timestamp': message.timestamp.toIso8601String(),
+      'isSystemMessage': message.isSystemMessage,
+      'type': message.type.toString().split('.').last,
     });
   }
 
@@ -21,6 +23,22 @@ class MessageManager {
       senderName: messageData['senderName'],
       senderId: messageData['senderId'],
       timestamp: DateTime.parse(messageData['timestamp']),
+      isSystemMessage: messageData['isSystemMessage'] ?? false,
+      type: _parseType(messageData['type']),
     );
+  }
+
+  static ChatMessageType _parseType(dynamic type) {
+    if (type == null) return ChatMessageType.normal;
+    if (type is ChatMessageType) return type;
+    final typeStr = type.toString();
+    switch (typeStr) {
+      case 'sos':
+        return ChatMessageType.sos;
+      case 'system':
+        return ChatMessageType.system;
+      default:
+        return ChatMessageType.normal;
+    }
   }
 }

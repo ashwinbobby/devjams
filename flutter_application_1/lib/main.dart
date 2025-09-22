@@ -1,10 +1,8 @@
-import 'dart:async';
 
+import 'dart:async';
 import 'dart:io';
-// import 'dart:math'; // Unused import removed
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
-
 import 'package:nearby_connections/nearby_connections.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'models/chat_message.dart';
@@ -14,6 +12,113 @@ import 'pages/home_page.dart';
 import 'pages/sos_page.dart';
 import 'pages/chat_page.dart';
 // import 'package:device_info_plus/device_info_plus.dart'; // Unused import removed
+
+import 'package:intl/intl.dart';
+
+class _SosPrompt extends StatelessWidget {
+  final String senderName;
+  final DateTime timestamp;
+  final VoidCallback onClose;
+  const _SosPrompt({required this.senderName, required this.timestamp, required this.onClose});
+
+  @override
+  Widget build(BuildContext context) {
+    final String formattedTime = DateFormat('HH:mm:ss - dd/MM/yyyy').format(timestamp);
+    return Material(
+      color: Colors.transparent,
+      child: Stack(
+        alignment: Alignment.center,
+        children: [
+          Container(
+            width: 270,
+            height: 270,
+            decoration: BoxDecoration(
+              color: Colors.white,
+              shape: BoxShape.circle,
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.redAccent.withOpacity(0.5),
+                  blurRadius: 40,
+                  spreadRadius: 10,
+                ),
+              ],
+            ),
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(18, 28, 18, 12),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.start,
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: [
+                  const Icon(Icons.warning_rounded, color: Colors.redAccent, size: 60),
+                  const SizedBox(height: 2),
+                  Text(
+                    'SOS',
+                    style: TextStyle(
+                      color: Colors.redAccent,
+                      fontSize: 44,
+                      fontWeight: FontWeight.bold,
+                      letterSpacing: 4,
+                      fontFamily: 'OrelegaOne',
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    'from',
+                    style: TextStyle(
+                      color: Colors.grey[700],
+                      fontSize: 16,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                  Text(
+                    senderName,
+                    style: TextStyle(
+                      color: Colors.black,
+                      fontSize: 20,
+                      fontWeight: FontWeight.bold,
+                      fontFamily: 'OrelegaOne',
+                    ),
+                    textAlign: TextAlign.center,
+                  ),
+                  const SizedBox(height: 10),
+                  Text(
+                    formattedTime,
+                    style: TextStyle(
+                      color: Colors.grey[700],
+                      fontSize: 12,
+                      fontWeight: FontWeight.w400,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          Positioned(
+            top: 18,
+            right: 18,
+            child: GestureDetector(
+              onTap: onClose,
+              child: Container(
+                decoration: BoxDecoration(
+                  color: Colors.redAccent,
+                  shape: BoxShape.circle,
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.redAccent.withOpacity(0.3),
+                      blurRadius: 8,
+                    ),
+                  ],
+                ),
+                padding: const EdgeInsets.all(8),
+                child: const Icon(Icons.close, color: Colors.white, size: 24),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
 
 Future<void> main() async {
   runApp(const App());
@@ -165,6 +270,52 @@ class _AppBodyState extends State<AppBody> {
   List<ChatMessage> _messages = [];
   final TextEditingController _messageController = TextEditingController();
 
+  // SOS prompt state
+  ChatMessage? _activeSosMessage;
+  Timer? _sosTimer;
+
+  void _sendSosMessage() {
+    final message = ChatMessage(
+      text: 'SOS!',
+      senderName: _currentUserName,
+      senderId: _currentUserId,
+      timestamp: DateTime.now(),
+      type: ChatMessageType.sos,
+    );
+    final messageJson = MessageManager.encodeMessage(message);
+    // Show locally
+    _showSosPrompt(message);
+    // Broadcast
+    if (_userRole == UserRole.client && _hostEndpointId != null) {
+      _sendPayload(_hostEndpointId!, messageJson);
+    } else if (_userRole == UserRole.host) {
+      for (String clientEndpointId in _connectedClients.keys) {
+        _sendPayload(clientEndpointId, messageJson);
+      }
+    }
+  }
+
+  void _showSosPrompt(ChatMessage sosMessage) {
+    _sosTimer?.cancel();
+    setState(() {
+      _activeSosMessage = sosMessage;
+    });
+    _sosTimer = Timer(const Duration(seconds: 5), () {
+      if (mounted) {
+        setState(() {
+          _activeSosMessage = null;
+        });
+      }
+    });
+  }
+
+  void _closeSosPrompt() {
+    _sosTimer?.cancel();
+    setState(() {
+      _activeSosMessage = null;
+    });
+  }
+
   // Navigation
   int _selectedIndex = 0; // 0: Home, 1: SOS, 2: Chat
 
@@ -200,8 +351,7 @@ class _AppBodyState extends State<AppBody> {
       return _buildRoleSelection();
     }
 
-    // Main navigation using modularized pages
-    return Column(
+    Widget mainContent = Column(
       children: [
         _buildStatusHeader(),
         Expanded(
@@ -213,7 +363,7 @@ class _AppBodyState extends State<AppBody> {
                 userRole: _userRole,
                 connectedClients: _connectedClients,
               ),
-              const SosPage(),
+              SosPage(onSendSos: _sendSosMessage),
               ChatPage(
                 state: _state,
                 userRole: _userRole,
@@ -233,6 +383,29 @@ class _AppBodyState extends State<AppBody> {
         _buildBottomNavBar(),
       ],
     );
+
+    // Overlay SOS prompt if active
+    if (_activeSosMessage != null) {
+      mainContent = Stack(
+        children: [
+          // Dimmed background
+          Positioned.fill(
+            child: Container(
+              color: Colors.black.withOpacity(0.65),
+            ),
+          ),
+          // Centered SOS prompt
+          Center(
+            child: _SosPrompt(
+              senderName: _activeSosMessage!.senderName,
+              timestamp: _activeSosMessage!.timestamp,
+              onClose: _closeSosPrompt,
+            ),
+          ),
+        ],
+      );
+    }
+    return mainContent;
   }
 
   Widget _buildBottomNavBar() {
@@ -323,23 +496,45 @@ class _AppBodyState extends State<AppBody> {
         border: Border.all(color: statusColor),
         borderRadius: BorderRadius.circular(8),
       ),
-      child: Column(
+      child: Stack(
         children: [
-          Text(
-            statusText,
-            style: TextStyle(
-              fontSize: 16,
-              fontWeight: FontWeight.bold,
-              color: statusColor,
+          Align(
+            alignment: Alignment.centerLeft,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  statusText,
+                  style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold,
+                    color: statusColor,
+                  ),
+                ),
+                if (_userRole == UserRole.host && _connectedClients.isNotEmpty) ...[
+                  const SizedBox(height: 4),
+                  Text(
+                    'Connected: ${_connectedClients.values.join(', ')}',
+                    style: TextStyle(fontSize: 12, color: Colors.grey[600]),
+                  ),
+                ],
+              ],
             ),
           ),
-          if (_userRole == UserRole.host && _connectedClients.isNotEmpty) ...[
-            const SizedBox(height: 4),
-            Text(
-              'Connected: ${_connectedClients.values.join(', ')}',
-              style: TextStyle(fontSize: 12, color: Colors.grey[600]),
+          if (_state != AppState.idle)
+            Align(
+              alignment: Alignment.topRight,
+              child: IconButton(
+                icon: Icon(Icons.logout, color: Colors.redAccent, size: 26),
+                tooltip: 'Disconnect',
+                onPressed: _stopAndGoBack,
+                splashRadius: 22,
+                padding: const EdgeInsets.all(4),
+                style: ButtonStyle(
+                  overlayColor: MaterialStateProperty.all(Colors.redAccent.withOpacity(0.1)),
+                ),
+              ),
             ),
-          ],
         ],
       ),
     );
@@ -490,10 +685,17 @@ class _AppBodyState extends State<AppBody> {
       showDialog(
         context: context,
         builder: (context) => AlertDialog(
+          backgroundColor: Theme.of(context).scaffoldBackgroundColor,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
           title: const Text('Connection Request'),
           content: Text('${info.endpointName} wants to connect. Accept?'),
+          actionsAlignment: MainAxisAlignment.spaceBetween,
           actions: [
             TextButton(
+              style: TextButton.styleFrom(
+                foregroundColor: Colors.redAccent,
+                textStyle: const TextStyle(fontWeight: FontWeight.bold),
+              ),
               onPressed: () {
                 Navigator.pop(context);
                 Nearby().rejectConnection(endpointId);
@@ -501,6 +703,12 @@ class _AppBodyState extends State<AppBody> {
               child: const Text('Reject'),
             ),
             ElevatedButton(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Theme.of(context).colorScheme.secondary,
+                foregroundColor: Theme.of(context).primaryColor,
+                textStyle: const TextStyle(fontWeight: FontWeight.bold),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+              ),
               onPressed: () {
                 Navigator.pop(context);
                 Nearby().acceptConnection(
@@ -566,14 +774,27 @@ class _AppBodyState extends State<AppBody> {
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
+        backgroundColor: Theme.of(context).scaffoldBackgroundColor,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
         title: const Text('Host Found'),
         content: Text('Found host "$endpointName". Connect?'),
+        actionsAlignment: MainAxisAlignment.spaceBetween,
         actions: [
           TextButton(
+            style: TextButton.styleFrom(
+              foregroundColor: Colors.redAccent,
+              textStyle: const TextStyle(fontWeight: FontWeight.bold),
+            ),
             onPressed: () => Navigator.pop(context),
             child: const Text('Cancel'),
           ),
           ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Theme.of(context).colorScheme.secondary,
+              foregroundColor: Theme.of(context).primaryColor,
+              textStyle: const TextStyle(fontWeight: FontWeight.bold),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+            ),
             onPressed: () {
               Navigator.pop(context);
               _requestConnection(endpointId, endpointName);
@@ -611,6 +832,9 @@ class _AppBodyState extends State<AppBody> {
       try {
         String jsonString = String.fromCharCodes(payload.bytes!);
         final chatMessage = MessageManager.decodeMessage(jsonString);
+        if (chatMessage.isSos) {
+          _showSosPrompt(chatMessage);
+        }
         setState(() {
           _messages.add(chatMessage);
         });
