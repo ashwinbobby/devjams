@@ -1,49 +1,143 @@
 import 'dart:async';
+
 import 'dart:io';
-
+// import 'dart:math'; // Unused import removed
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
-import 'package:nearby_service/nearby_service.dart';
 
-/// All UI components and utilities are moved out of main
-/// to focus on the nearby_service plugin.
-/// If you are interested to see them,
-/// see https://github.com/ksenia312/nearby_service/blob/main/example/lib/.
-import 'components/connected_device_view.dart';
-import 'components/files_messaging_view.dart';
-import 'components/darwin_role_selector.dart';
-import 'components/peer_widget.dart';
-import 'components/text_messaging_view.dart';
-import 'utils/app_snack_bar.dart';
-import 'utils/file_saver.dart';
+import 'package:nearby_connections/nearby_connections.dart';
+import 'package:permission_handler/permission_handler.dart';
+import 'models/chat_message.dart';
+import 'core/network_manager.dart';
+import 'core/message_manager.dart';
+import 'pages/home_page.dart';
+import 'pages/sos_page.dart';
+import 'pages/chat_page.dart';
+// import 'package:device_info_plus/device_info_plus.dart'; // Unused import removed
 
-/// Short example variant for pub.dev
-/// See the full example at
-/// https://github.com/ksenia312/nearby_service/tree/main/example_full
 Future<void> main() async {
   runApp(const App());
 }
 
-/// Simplified application states, main 3:
-/// - Preparatory
-/// - Device search
-/// - Communicating with the connected device
-enum AppState { idle, discovering, connected }
+enum AppState { idle, hosting, discovering, connected }
+enum UserRole { none, host, client }
 
 class App extends StatelessWidget {
   const App({super.key});
 
   @override
   Widget build(BuildContext context) {
+    // Minimalist dark theme colors
+    final Color primaryColor = const Color(0xFF23272F); // Deep blue-grey
+    final Color accentColor = const Color(0xFF7F8CFF); // Soft blue accent
+    final Color backgroundColor = const Color(0xFF181A20); // Almost black
+    final Color cardColor = const Color(0xFF23272F); // Same as primary for minimalism
+    final Color textColor = const Color(0xFFEAEAEA); // Subtle off-white
+    final Color secondaryTextColor = const Color(0xFFB0B3B8); // Muted grey
+    final Color borderColor = const Color(0xFF31343B); // Subtle border
+
     return MaterialApp(
-      title: 'Nearby Service Example',
+      title: 'Host-Client Messaging',
+      theme: ThemeData(
+        brightness: Brightness.dark,
+        primaryColor: primaryColor,
+        scaffoldBackgroundColor: backgroundColor,
+        cardColor: cardColor,
+        colorScheme: ColorScheme.dark(
+          primary: primaryColor,
+          secondary: accentColor,
+          background: backgroundColor,
+        ),
+        fontFamily: 'OrelegaOne',
+        textTheme: ThemeData.dark().textTheme.copyWith(
+          headlineLarge: TextStyle(
+            fontFamily: 'OrelegaOne',
+            fontSize: 32,
+            fontWeight: FontWeight.bold,
+            color: textColor,
+          ),
+          headlineMedium: TextStyle(
+            fontFamily: 'OrelegaOne',
+            fontSize: 24,
+            fontWeight: FontWeight.bold,
+            color: textColor,
+          ),
+          titleLarge: TextStyle(
+            fontFamily: 'OrelegaOne',
+            fontSize: 20,
+            fontWeight: FontWeight.bold,
+            color: textColor,
+          ),
+          bodyLarge: TextStyle(
+            fontFamily: 'OrelegaOne',
+            fontSize: 16,
+            color: textColor,
+          ),
+          bodyMedium: TextStyle(
+            fontFamily: 'OrelegaOne',
+            fontSize: 14,
+            color: secondaryTextColor,
+          ),
+        ),
+        elevatedButtonTheme: ElevatedButtonThemeData(
+          style: ElevatedButton.styleFrom(
+            backgroundColor: accentColor,
+            foregroundColor: primaryColor,
+            textStyle: const TextStyle(
+              fontFamily: 'OrelegaOne',
+              fontWeight: FontWeight.bold,
+              fontSize: 16,
+            ),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(14),
+              side: BorderSide(color: borderColor, width: 1),
+            ),
+            elevation: 0,
+          ),
+        ),
+        inputDecorationTheme: InputDecorationTheme(
+          filled: true,
+          fillColor: cardColor,
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(20),
+            borderSide: BorderSide(color: borderColor),
+          ),
+          focusedBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(20),
+            borderSide: BorderSide(color: accentColor, width: 2),
+          ),
+          hintStyle: TextStyle(color: secondaryTextColor),
+        ),
+        appBarTheme: AppBarTheme(
+          backgroundColor: primaryColor,
+          elevation: 0,
+          titleTextStyle: TextStyle(
+            fontFamily: 'OrelegaOne',
+            fontSize: 24,
+            fontWeight: FontWeight.bold,
+            color: textColor,
+          ),
+          iconTheme: IconThemeData(color: accentColor),
+        ),
+        floatingActionButtonTheme: FloatingActionButtonThemeData(
+          backgroundColor: accentColor,
+          foregroundColor: primaryColor,
+          elevation: 0,
+        ),
+        dividerColor: borderColor,
+        iconTheme: IconThemeData(color: accentColor),
+      ),
       home: Scaffold(
-        appBar: AppBar(title: const Text('Nearby Service Example')),
+        appBar: AppBar(
+          title: const Text('Host-Client Messaging'),
+        ),
         body: Container(
           alignment: Alignment.topCenter,
           padding: const EdgeInsets.all(20),
           child: const AppBody(),
         ),
       ),
+      debugShowCheckedModeBanner: false,
     );
   }
 }
@@ -56,302 +150,563 @@ class AppBody extends StatefulWidget {
 }
 
 class _AppBodyState extends State<AppBody> {
-  /// Our service
-  late final _nearbyService = NearbyService.getInstance(
-    /// Define log level here
-    logLevel: NearbyServiceLogLevel.debug,
-  );
-
   AppState _state = AppState.idle;
+  UserRole _userRole = UserRole.none;
+  
+  // Create our own user ID
+  late final String _currentUserId;
+  late final String _currentUserName;
 
-  /// Browser OR Advertiser for IOS/MacOS
-  bool _isDarwinBrowser = true;
+  // Device management
+  Map<String, String> _connectedClients = {}; // endpointId -> deviceName
+  String? _hostEndpointId;
 
-  /// List of discovered devices
-  List<NearbyDevice> _peers = [];
-  StreamSubscription? _peersSubscription;
-  CommunicationChannelState _communicationChannelState =
-      CommunicationChannelState.notConnected;
+  // Messages
+  List<ChatMessage> _messages = [];
+  final TextEditingController _messageController = TextEditingController();
 
-  /// Temporary solution to check the connection,
-  /// use [NearbyService.getConnectedDeviceStreamById] for this purpose
-  /// in your application
-  Timer? _connectionCheckTimer;
-  NearbyDevice? _connectedDevice;
+  // Navigation
+  int _selectedIndex = 0; // 0: Home, 1: SOS, 2: Chat
+
+  // NetworkManager constants are now used
 
   @override
   void initState() {
+    // Generate unique user ID and name
+    _currentUserId = 'user_${DateTime.now().millisecondsSinceEpoch}_${(Platform.isAndroid ? 'android' : 'ios')}';
+    _currentUserName = 'User${DateTime.now().millisecondsSinceEpoch.toString().substring(8)}';
+    
     _initialize();
     super.initState();
   }
 
   @override
   void dispose() {
-    _peersSubscription?.cancel();
-    _connectionCheckTimer?.cancel();
+    _stopAll();
+    _messageController.dispose();
     super.dispose();
+  }
+
+  void _onNavBarTap(int index) {
+    setState(() {
+      _selectedIndex = index;
+    });
   }
 
   @override
   Widget build(BuildContext context) {
+    // Show only role selection if idle
     if (_state == AppState.idle) {
-      return Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          if (Platform.isIOS || Platform.isMacOS)
-            DarwinRoleSelector(
-              isDarwinBrowser: _isDarwinBrowser,
-              onSelect: (value) => setState(() => _isDarwinBrowser = value),
-            ),
-          ElevatedButton(
-            onPressed: _startProcess,
-            child: const Text('Start'),
+      return _buildRoleSelection();
+    }
+
+    // Main navigation using modularized pages
+    return Column(
+      children: [
+        _buildStatusHeader(),
+        Expanded(
+          child: IndexedStack(
+            index: _selectedIndex,
+            children: [
+              HomePage(
+                state: _state,
+                userRole: _userRole,
+                connectedClients: _connectedClients,
+              ),
+              const SosPage(),
+              ChatPage(
+                state: _state,
+                userRole: _userRole,
+                messages: _messages,
+                messageController: _messageController,
+                onSendMessage: _sendMessage,
+                currentUserId: _currentUserId,
+                currentUserName: _currentUserName,
+                connectedClients: _connectedClients,
+                hostEndpointId: _hostEndpointId,
+                sendPayload: _sendPayload,
+                onStartChatting: () => setState(() => _state = AppState.connected),
+              ),
+            ],
+          ),
+        ),
+        _buildBottomNavBar(),
+      ],
+    );
+  }
+
+  Widget _buildBottomNavBar() {
+    return Container(
+      decoration: BoxDecoration(
+        color: Theme.of(context).cardColor,
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(18)),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.12),
+            blurRadius: 8,
+            offset: const Offset(0, -2),
           ),
         ],
-      );
-    } else if (_state == AppState.discovering) {
-      return ListView(
-        children: [
-          if (Platform.isIOS || Platform.isMacOS)
-            Text('You are ${_isDarwinBrowser ? 'Browser' : 'Advertiser'}'),
-          if (_peers.isEmpty) const Text('Searching for peers...'),
-          ..._peers.map(
-            (e) => PeerWidget(
-              device: e,
-              isDarwinBrowser: _isDarwinBrowser,
-              onConnect: _connect,
-              communicationChannelState: _communicationChannelState,
-            ),
-          ),
-        ],
-      );
-    } else if (_state == AppState.connected) {
-      return SingleChildScrollView(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.start,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
+      ),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      child: SafeArea(
+        top: false,
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.spaceAround,
           children: [
-            // Preview of the connected device
-            ConnectedDeviceView(
-              device: _connectedDevice!,
-              onDisconnect: _disconnect,
+            IconButton(
+              icon: Icon(Icons.home_rounded, color: _selectedIndex == 0 ? Theme.of(context).colorScheme.secondary : Theme.of(context).iconTheme.color, size: 30),
+              onPressed: () => _onNavBarTap(0),
+              tooltip: 'Home',
             ),
-            const SizedBox(height: 50),
-            // Send messages section
-            TextMessagingView(
-              onSend: (message) => _send(
-                NearbyMessageTextRequest.create(value: message),
+            Container(
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: _selectedIndex == 1 ? Colors.redAccent : Theme.of(context).colorScheme.secondary,
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.redAccent.withOpacity(_selectedIndex == 1 ? 0.3 : 0.1),
+                    blurRadius: 12,
+                    spreadRadius: 2,
+                  ),
+                ],
+              ),
+              child: IconButton(
+                icon: Icon(Icons.warning_rounded, color: Colors.white, size: 32),
+                onPressed: () => _onNavBarTap(1),
+                tooltip: 'SOS',
               ),
             ),
+            IconButton(
+              icon: Icon(Icons.chat_bubble_rounded, color: _selectedIndex == 2 ? Theme.of(context).colorScheme.secondary : Theme.of(context).iconTheme.color, size: 30),
+              onPressed: () => _onNavBarTap(2),
+              tooltip: 'Chat',
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 
-            const SizedBox(height: 50),
-            // Send files section
-            FilesMessagingView(
-              onSend: (files) {
-                _send(
-                  NearbyMessageFilesRequest.create(files: files),
+
+  Widget _buildStatusHeader() {
+    String statusText;
+    Color statusColor;
+
+    switch (_state) {
+      case AppState.idle:
+        statusText = 'Not Connected';
+        statusColor = Colors.grey;
+        break;
+      case AppState.hosting:
+        statusText = 'HOST - ${_connectedClients.length} clients connected';
+        statusColor = Colors.green;
+        break;
+      case AppState.discovering:
+        statusText = 'Searching for host...';
+        statusColor = Colors.orange;
+        break;
+      case AppState.connected:
+        statusText = _userRole == UserRole.host 
+            ? 'HOST - ${_connectedClients.length} clients connected'
+            : 'CLIENT - Connected to host';
+        statusColor = Colors.green;
+        break;
+    }
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(16),
+      margin: const EdgeInsets.only(bottom: 16),
+      decoration: BoxDecoration(
+        color: statusColor.withOpacity(0.1),
+        border: Border.all(color: statusColor),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Column(
+        children: [
+          Text(
+            statusText,
+            style: TextStyle(
+              fontSize: 16,
+              fontWeight: FontWeight.bold,
+              color: statusColor,
+            ),
+          ),
+          if (_userRole == UserRole.host && _connectedClients.isNotEmpty) ...[
+            const SizedBox(height: 4),
+            Text(
+              'Connected: ${_connectedClients.values.join(', ')}',
+              style: TextStyle(fontSize: 12, color: Colors.grey[600]),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+
+
+  Widget _buildRoleSelection() {
+    return Column(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        const Text(
+          'Choose your role:',
+          style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+        ),
+        const SizedBox(height: 30),
+
+        SizedBox(
+          width: double.infinity,
+          height: 50,
+          child: ElevatedButton(
+            onPressed: _startAsHost,
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.green,
+              foregroundColor: Colors.white,
+            ),
+            child: const Text('Create Host', style: TextStyle(fontSize: 16)),
+          ),
+        ),
+        const SizedBox(height: 16),
+        SizedBox(
+          width: double.infinity,
+          height: 50,
+          child: ElevatedButton(
+            onPressed: _startAsClient,
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.blue,
+              foregroundColor: Colors.white,
+            ),
+            child: const Text('Join as Client', style: TextStyle(fontSize: 16)),
+          ),
+        ),
+        const SizedBox(height: 20),
+        const Text(
+          'No WiFi or internet needed!\nDevices communicate directly using Bluetooth/WiFi Direct.',
+          textAlign: TextAlign.center,
+          style: TextStyle(color: Colors.grey),
+        ),
+      ],
+    );
+  }
+
+
+
+
+
+
+
+
+  Future<void> _initialize() async {
+    await _requestPermissions();
+  }
+
+  Future<void> _requestPermissions() async {
+    Map<Permission, PermissionStatus> statuses = await [
+      Permission.bluetooth,
+      Permission.bluetoothAdvertise,
+      Permission.bluetoothConnect,
+      Permission.bluetoothScan,
+      Permission.location,
+      Permission.nearbyWifiDevices,
+    ].request();
+
+    bool allGranted = statuses.values.every((status) => 
+        status == PermissionStatus.granted || status == PermissionStatus.limited);
+    
+    if (!allGranted) {
+      _showError('Please grant all permissions for the app to work');
+    }
+  }
+
+  Future<void> _startAsHost() async {
+    setState(() {
+      _userRole = UserRole.host;
+      _state = AppState.hosting;
+    });
+
+    _addSystemMessage('Starting host...');
+
+    try {
+      bool result = await NetworkManager.startAdvertising(
+        _currentUserName,
+        _onConnectionInitiated,
+        _onConnectionResult,
+        _onDisconnected,
+        _onPayloadReceived,
+      );
+      if (result) {
+        _addSystemMessage('Host started successfully!');
+        _addSystemMessage('Waiting for clients to connect...');
+      } else {
+        throw Exception('Failed to start advertising');
+      }
+    } catch (e) {
+      _showError('Failed to start host: $e');
+      _stopAndGoBack();
+    }
+  }
+
+  Future<void> _startAsClient() async {
+    setState(() {
+      _userRole = UserRole.client;
+      _state = AppState.discovering;
+    });
+
+    try {
+      bool result = await NetworkManager.startDiscovery(
+        _currentUserName,
+        _onEndpointFound,
+        (endpointId) {
+          if (endpointId != null) {
+            _onEndpointLost(endpointId);
+          }
+        },
+      );
+      if (result) {
+        _addSystemMessage('Searching for hosts...');
+      } else {
+        throw Exception('Failed to start discovery');
+      }
+    } catch (e) {
+      _showError('Failed to start discovery: $e');
+      _stopAndGoBack();
+    }
+  }
+
+  void _onConnectionInitiated(String endpointId, ConnectionInfo info) {
+    print('Connection initiated from ${info.endpointName}');
+    
+    // Auto-accept all connections if we're the host
+    if (_userRole == UserRole.host) {
+      NetworkManager.acceptConnection(
+        endpointId,
+        _onPayloadReceived,
+      );
+    } else {
+      // Show dialog for client connections
+      showDialog(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('Connection Request'),
+          content: Text('${info.endpointName} wants to connect. Accept?'),
+          actions: [
+            TextButton(
+              onPressed: () {
+                Navigator.pop(context);
+                Nearby().rejectConnection(endpointId);
+              },
+              child: const Text('Reject'),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                Navigator.pop(context);
+                Nearby().acceptConnection(
+                  endpointId,
+                  onPayLoadRecieved: _onPayloadReceived,
                 );
               },
+              child: const Text('Accept'),
             ),
           ],
         ),
       );
     }
-    return Container();
   }
 
-  Future<void> _initialize() async {
-    await _nearbyService.initialize();
-  }
-
-  Future<void> _startProcess() async {
-    final platformsReady = await _checkPlatforms();
-    if (platformsReady) {
-      await _discover();
-    }
-  }
-
-  Future<bool> _checkPlatforms() async {
-    if (Platform.isAndroid) {
-      final isGranted = await _nearbyService.android?.requestPermissions();
-      final wifiEnabled = await _nearbyService.android?.checkWifiService();
-      return (isGranted ?? false) && (wifiEnabled ?? false);
-    } else if (Platform.isIOS || Platform.isMacOS) {
-      _nearbyService.darwin?.setIsBrowser(value: _isDarwinBrowser);
-      return true;
-    } else {
-      return false;
-    }
-  }
-
-  Future<void> _discover() async {
-    final result = await _nearbyService.discover();
-    if (result) {
-      setState(() {
-        _state = AppState.discovering;
-      });
-      _peersSubscription = _nearbyService.getPeersStream().listen((event) {
+  void _onConnectionResult(String endpointId, Status status) {
+    print('Connection result with $endpointId: ${status.toString()}');
+    
+    if (status == Status.CONNECTED) {
+      if (_userRole == UserRole.host) {
+        // Host accepted a client
         setState(() {
-          _peers = event;
-          // Check and filter your peers here
+          _connectedClients[endpointId] = 'Client_${endpointId.substring(0, 4)}';
+          if (_connectedClients.length == 1) {
+            _state = AppState.hosting; // Stay in hosting mode until manually switched
+          }
         });
-      });
-    }
-  }
-
-  Future<void> _connect(NearbyDevice device) async {
-    // Be careful with already connected devices,
-    // double connection may be unnecessary
-    final result = await _nearbyService.connectById(device.info.id);
-    if (result || device.status.isConnected) {
-      final channelStarting = _tryCommunicate(device);
-      if (!channelStarting) {
-        _connectionCheckTimer = Timer.periodic(
-          const Duration(seconds: 3),
-          (_) => _tryCommunicate(device),
-        );
+        _addSystemMessage('Client connected: ${_connectedClients[endpointId]}');
+      } else {
+        // Client connected to host
+        _hostEndpointId = endpointId;
+        setState(() => _state = AppState.connected);
+        _addSystemMessage('Connected to host successfully!');
       }
+    } else {
+      _showError('Connection failed');
     }
   }
 
-  bool _tryCommunicate(NearbyDevice device) {
-    NearbyDevice? selectedDevice;
-
-    try {
-      selectedDevice = _peers.firstWhere(
-        (element) => element.info.id == device.info.id,
-      );
-    } catch (_) {
-      return false;
-    }
-
-    if (selectedDevice.status.isConnected) {
-      try {
-        _startCommunicationChannel(device);
-      } finally {
-        _connectionCheckTimer?.cancel();
-        _connectionCheckTimer = null;
-      }
-      return true;
-    }
-    return false;
-  }
-
-  void _startCommunicationChannel(NearbyDevice device) {
-    if (_communicationChannelState != CommunicationChannelState.notConnected) {
-      // channel is loading or already connected
-      return;
-    }
-    // start listening communication channel state
-    _nearbyService.getCommunicationChannelStateStream().listen((event) {
-      _communicationChannelState = event;
-    });
-    _nearbyService.startCommunicationChannel(
-      NearbyCommunicationChannelData(
-        device.info.id,
-        filesListener: NearbyServiceFilesListener(
-          onData: (pack) => _filesListener(Scaffold.of(context).context, pack),
-        ),
-        messagesListener: NearbyServiceMessagesListener(
-          onData: _messagesListener,
-          onCreated: () {
-            setState(() {
-              _connectedDevice = device;
-              _state = AppState.connected;
-            });
-          },
-          onError: (e, [StackTrace? s]) {
-            setState(() {
-              _connectedDevice = null;
-              _state = AppState.idle;
-            });
-          },
-          onDone: () {
-            setState(() {
-              _connectedDevice = null;
-              _state = AppState.idle;
-            });
-          },
-        ),
-      ),
-    );
-  }
-
-  Future<void> _disconnect() async {
-    try {
-      await _nearbyService.disconnectById(_connectedDevice!.info.id);
-    } finally {
-      await _nearbyService.endCommunicationChannel();
-      await _nearbyService.stopDiscovery();
-      await _peersSubscription?.cancel();
+  void _onDisconnected(String endpointId) {
+    print('Disconnected from $endpointId');
+    
+    if (_userRole == UserRole.host) {
+      final clientName = _connectedClients[endpointId];
       setState(() {
-        _peers = [];
-        _state = AppState.idle;
+        _connectedClients.remove(endpointId);
+        if (_connectedClients.isEmpty && _state == AppState.connected) {
+          _state = AppState.hosting;
+        }
       });
+      if (clientName != null) {
+        _addSystemMessage('$clientName disconnected');
+      }
+    } else {
+      _addSystemMessage('Disconnected from host');
+      _stopAndGoBack();
     }
   }
 
-  void _messagesListener(ReceivedNearbyMessage<NearbyMessageContent> message) {
-    if (_connectedDevice == null) return;
-    // Very useful stuff! Process messages according to the type of content
-    message.content.byType(
-      onTextRequest: (request) {
-        AppSnackBar.show(
-          context,
-          title: request.value,
-          subtitle: message.sender.displayName,
-        ).whenComplete(
-          () => _send(NearbyMessageTextResponse(id: request.id)),
-        );
-      },
-      onTextResponse: (response) {
-        AppSnackBar.show(
-          context,
-          title: 'Message ${response.id} was delivered',
-          subtitle: message.sender.displayName,
-        );
-      },
-      onFilesRequest: (request) {
-        AppSnackBar.show(
-          context,
-          title: 'Request to receive ${request.files.length} files',
-          subtitle: message.sender.displayName,
-          actionName: 'Accept the files?',
-          onAcceptAction: () {
-            _send(
-              NearbyMessageFilesResponse(id: request.id, isAccepted: true),
-            );
-          },
-        );
-      },
-      onFilesResponse: (response) {
-        AppSnackBar.show(
-          context,
-          title: 'Response ${response.id} for the files '
-              '${response.isAccepted ? 'is accepted' : 'was denied'}',
-          subtitle: message.sender.displayName,
-        );
-      },
-    );
-  }
-
-  Future<void> _filesListener(
-    BuildContext context,
-    ReceivedNearbyFilesPack pack,
-  ) async {
-    await FilesSaver.savePack(pack);
-    if (context.mounted) {
-      AppSnackBar.show(context, title: 'Files pack was saved');
-    }
-  }
-
-  Future<void> _send(NearbyMessageContent content) async {
-    if (_connectedDevice == null) return;
-    await _nearbyService.send(
-      OutgoingNearbyMessage(
-        content: content,
-        receiver: _connectedDevice!.info,
+  void _onEndpointFound(String endpointId, String endpointName, String serviceId) {
+    print('Found endpoint: $endpointName ($endpointId)');
+    
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Host Found'),
+        content: Text('Found host "$endpointName". Connect?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              Navigator.pop(context);
+              _requestConnection(endpointId, endpointName);
+            },
+            child: const Text('Connect'),
+          ),
+        ],
       ),
     );
+  }
+
+  void _onEndpointLost(String endpointId) {
+    print('Lost endpoint: $endpointId');
+  }
+
+  Future<void> _requestConnection(String endpointId, String endpointName) async {
+    try {
+      bool result = await NetworkManager.requestConnection(
+        _currentUserName,
+        endpointId,
+        _onConnectionInitiated,
+        _onConnectionResult,
+        _onDisconnected,
+      );
+      if (!result) {
+        _showError('Failed to request connection');
+      }
+    } catch (e) {
+      _showError('Error requesting connection: $e');
+    }
+  }
+
+  void _onPayloadReceived(String endpointId, Payload payload) {
+    if (payload.type == PayloadType.BYTES) {
+      try {
+        String jsonString = String.fromCharCodes(payload.bytes!);
+        final chatMessage = MessageManager.decodeMessage(jsonString);
+        setState(() {
+          _messages.add(chatMessage);
+        });
+        // If this is the host, forward the message to all other clients
+        if (_userRole == UserRole.host && chatMessage.senderId != _currentUserId) {
+          _forwardMessageToOtherClients(jsonString, endpointId);
+        }
+      } catch (e) {
+        print('Error handling received message: $e');
+      }
+    }
+  }
+
+  void _forwardMessageToOtherClients(String messageJson, String originalSenderEndpointId) {
+    for (String clientEndpointId in _connectedClients.keys) {
+      if (clientEndpointId != originalSenderEndpointId) {
+        _sendPayload(clientEndpointId, messageJson);
+      }
+    }
+  }
+
+  void _sendMessage() {
+    final text = _messageController.text.trim();
+    if (text.isEmpty) return;
+
+    final message = ChatMessage(
+      text: text,
+      senderName: _currentUserName,
+      senderId: _currentUserId,
+      timestamp: DateTime.now(),
+    );
+    setState(() {
+      _messages.add(message);
+    });
+    _messageController.clear();
+    final messageJson = MessageManager.encodeMessage(message);
+    if (_userRole == UserRole.client && _hostEndpointId != null) {
+      // Client sends to host
+      _sendPayload(_hostEndpointId!, messageJson);
+    } else if (_userRole == UserRole.host) {
+      // Host sends to all clients
+      for (String clientEndpointId in _connectedClients.keys) {
+        _sendPayload(clientEndpointId, messageJson);
+      }
+    }
+  }
+
+  void _sendPayload(String endpointId, String messageJson) {
+    try {
+      NetworkManager.sendBytesPayload(
+        endpointId,
+        Uint8List.fromList(messageJson.codeUnits),
+      );
+    } catch (e) {
+      print('Error sending payload to $endpointId: $e');
+    }
+  }
+
+  void _addSystemMessage(String text) {
+    setState(() {
+      _messages.add(ChatMessage(
+        text: text,
+        senderName: 'System',
+        senderId: 'system',
+        timestamp: DateTime.now(),
+        isSystemMessage: true,
+      ));
+    });
+  }
+
+  void _showError(String message) {
+    // No-op: Remove red SnackBar error notifications as requested
+  }
+
+  Future<void> _stopAndGoBack() async {
+    await _stopAll();
+    setState(() {
+      _state = AppState.idle;
+      _userRole = UserRole.none;
+    });
+  }
+
+  Future<void> _stopAll() async {
+    try {
+      await NetworkManager.stopAdvertising();
+      await NetworkManager.stopDiscovery();
+      await NetworkManager.stopAllEndpoints();
+    } catch (e) {
+      print('Error during cleanup: $e');
+    }
+
+    setState(() {
+      _connectedClients.clear();
+      _hostEndpointId = null;
+      _messages.clear();
+    });
   }
 }
+
